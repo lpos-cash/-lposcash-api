@@ -5,8 +5,13 @@ const axios = require('axios').default
 const lodash = require('lodash')
 const moment = require('moment')
 
-const WXDataService = axios.create({ baseURL: 'https://api.wavesplatform.com/v0' })
+//const WXDataService = axios.create({ baseURL: 'https://api.wavesplatform.com/v0' })
 const WavesNode = axios.create({ baseURL: 'https://nodes.wavesnodes.com/' })
+
+const BlockChain = {
+  height: null,
+  heightLastRead: null
+}
 
 export class LposCash {
   constructor(){
@@ -25,8 +30,6 @@ export class LposCash {
       serviceWaves: null
     }
 
-    this.height = null
-    this.heightLastRead = null
 
     this.clearLeaseCache()
   }
@@ -53,10 +56,7 @@ export class LposCash {
   async login(){
     this.user = await this.signer.login()
     
-    await Promise.all([
-      this.updateBalances(),
-      this.updateLeaseData()
-    ])
+    await this.update()
 
     console.log('login complete')
   }
@@ -66,29 +66,47 @@ export class LposCash {
     this.clear()
   }
 
+  async update(){
+    await Promise.all([
+      this.updateBalances(),
+      this.updateLeaseData()
+    ])
+  }
+
   async updateLeaseData(){
     this.clearLeaseCache()
 
-    await Promise.all([
-      this.getLeaseTxns(),
-      this.getLeaseTxns('cancelled')
-    ])
+    //await Promise.all([
+      //this.getLeaseTxns(),
+      //this.getLeaseTxns('cancelled'),
+    //])
+
+    //! Use a second source for active txns to ensure we get txns sent to an alias
+    const leaseInfo = await LposCash.fetchLeasingActiveTxns(this.user.address)
+
+    this.leases = leaseInfo.leases
+    this.leaseTxns = leaseInfo.txns
+
+    //! Filter uniques
+    /*this.leases.active = lodash.uniq(this.leases.active)
+    this.leases.pending = lodash.uniq(this.leases.pending)
+    this.leases.cancelled = lodash.uniq(this.leases.cancelled)
 
     const filterInactive = [].concat(this.leases.pending).concat(this.leases.cancelled)
 
     lodash.pullAll(this.leases.active, filterInactive)
-    lodash.pullAll(this.leases.pending, this.leases.cancelled)
+    lodash.pullAll(this.leases.pending, this.leases.cancelled)*/
 
     this.leasedTotal.active = this.sumLeases(this.leases.active)
     this.leasedTotal.pending = this.sumLeases(this.leases.pending)
-    this.leasedTotal.cancelled = this.sumLeases(this.leases.cancelled)
+    //this.leasedTotal.cancelled = this.sumLeases(this.leases.cancelled)
   }
 
   async updateBalances(){
     let [balancesAllAssets, balancesWaves, balancesService] = await Promise.all([
       this.signer.getBalance(),
-      this.getBalanceDetails(this.user.address),
-      this.getBalanceDetails(LposCash.ServiceAddress)
+      LposCash.fetchBalanceDetails(this.user.address),
+      LposCash.fetchBalanceDetails(LposCash.ServiceAddress)
     ])
 
     this.balances = {
@@ -99,7 +117,7 @@ export class LposCash {
   }
 
   leaseTxn(id){
-    return this.leaseTxns.active[id]
+    return this.leaseTxns[id]
   }
 
   sumLeases(ids){
@@ -107,21 +125,48 @@ export class LposCash {
 
     ids.map(id=>{
       const txn = this.leaseTxn(id)
-      sum+=txn.data.amount
+      sum+=txn.amount
     })
 
     return sum
   }
 
-  async getLeasingActive(address){
+  static async fetchLeasingActiveTxns(address){
     const res = await WavesNode.get('/leasing/active/'+address)
 
+    console.log(res)
+    await LposCash.fetchHeight()
+
+    let result = {
+      txns: {},
+      leases: {
+        active: [],
+        pending: []
+      }
+    }
+
     res.data.map(txn=>{
-      this.
+      result.txns[txn.id] = txn
+
+      if(txn.recipient != LposCash.ServiceAddress && txn.recipient != 'alias:W:' + LposCash.ServiceAlias){
+        console.log('lease ignored', txn.id)
+
+        return
+      }
+
+      if(BlockChain.height >= (txn.height + 1000)){
+        result.leases.active.push(txn.id)
+        console.log('lease active', txn.id)
+      } else {
+        result.leases.pending.push(txn.id)
+        console.log('lease pending', txn.id)
+      }
     })
 
+    return result
   }
 
+  /*
   async getLeaseTxns(type='active', after){
     let path = '/transactions/lease'
     if(type=='cancelled'){ path += '-cancel' }
@@ -143,20 +188,20 @@ export class LposCash {
     if(res.status == 200){
 
       const transactions = res.data.data
-      await this.getHeight()
+      await LposCash.fetchHeight()
 
       transactions.map(txn=>{
         
         if(type == 'cancelled'){ 
-          this.leaseTxns[type][txn.data.leaseId] = txn
+          this.leaseTxns[type][txn.data.leaseId] = txn.data
           this.leases.cancelled.push(txn.data.leaseId)
 
           //console.log('lease cancel', txn.data.leaseId)
         }
         else if(type == 'active'){
-          this.leaseTxns[type][txn.data.id] = txn
+          this.leaseTxns[type][txn.data.id] = txn.data
 
-          if(this.height >= (txn.data.height + 1000)){
+          if(BlockChain.height >= (txn.data.height + 1000)){
             this.leases.active.push(txn.data.id)
             //console.log('lease active', txn.data.id)
           } else {
@@ -173,23 +218,23 @@ export class LposCash {
         return await this.getLeaseTxns(type, lastCursor)
       }
     }
-  }
+  }*/
 
-  async getHeight(){
+  static async fetchHeight(){
     const now = new moment()
 
     //! Rate limit lookup
-    if(this.heightLastRead != null){
-      const deltaMs = now.diff(this.heightLastRead)
+    if(BlockChain.heightLastRead != null){
+      const deltaMs = now.diff(BlockChain.heightLastRead)
       if(deltaMs < 1000 * 25){ return }
     }
 
     const res = await WavesNode.get('blocks/height')
-    this.height = res.data.height
-    this.heightLastRead = now
+    BlockChain.height = res.data.height
+    BlockChain.heightLastRead = now
   }
 
-  async getBalanceDetails(address){
+  static async fetchBalanceDetails(address){
     const res = await WavesNode.get('/addresses/balance/details/'+address)
 
     return res.data
@@ -197,9 +242,8 @@ export class LposCash {
 
   async requestLease(amount){
     const tx = await this.signer.lease({
-      amount: Math.pow(10, 8) * amount,
-      //recipient: 'alias:T:'+LposCash.ServiceAlias
-      recipient: LposCash.ServiceAddress
+      amount,
+      recipient: 'alias:W:'+LposCash.ServiceAlias
     })
     .broadcast()
 
