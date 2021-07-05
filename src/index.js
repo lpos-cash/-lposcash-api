@@ -105,6 +105,7 @@ export class LposCash {
         break;
 
       case 'ledger':
+        throw new Error('ledger not yet supported')
         break;
 
     }
@@ -135,6 +136,7 @@ export class LposCash {
         break;
 
       case 'ledger':
+        throw new Error('ledger not yet supported')
         break;
     }
     
