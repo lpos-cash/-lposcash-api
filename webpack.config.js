@@ -9,11 +9,11 @@ const CompressionPlugin = require('compression-webpack-plugin')
 var nodeExternals = require('webpack-node-externals')
 
 var browser_config = {
-  mode: 'production',
+  mode: 'development',
   entry: {
     '@lposcash/api': './src/index.js'
   },
-  devtool: 'cheap-module-source-map',
+  devtool: 'eval-source-map',
   optimization: {
     minimize: true
   },
@@ -22,6 +22,15 @@ var browser_config = {
     libraryTarget: 'var',
     path: path.join(__dirname, 'dist'),
     filename: 'lposcash-web.js'
+  },
+  resolve: {
+    fallback: {
+      "zlib": require.resolve("zlib-browserify"),
+      "http": require.resolve("http-browserify"),
+      "https": require.resolve("https-browserify"),
+      "constants": require.resolve("constants-browserify")
+      
+    }
   },
   /*node: {
     fs: 'empty',
