@@ -1,9 +1,26 @@
 import { Signer } from '@waves/signer';
 import { ProviderWeb } from '@waves.exchange/provider-web'
+import { ProviderSeed } from '@waves/provider-seed'
+import { ProviderCloud } from '@waves.exchange/provider-cloud'
+import { Waves } from '@waves/ledger/lib/Waves';
+
+const debug = require('debug')('lease-web')
+
+//import { libs } from '@waves/waves-transactions';
+
+require('ccxt/dist/ccxt.browser')
+
+const wavesexchange  = window.ccxt.wavesexchange
 
 const axios = require('axios').default
 const lodash = require('lodash')
 const moment = require('moment')
+
+const SIGNER_PROVIDERS = {
+  web: ProviderWeb,
+  seed: ProviderSeed,
+  cloud: ProviderCloud
+}
 
 //const WXDataService = axios.create({ baseURL: 'https://api.wavesplatform.com/v0' })
 const WavesNode = axios.create({ baseURL: 'https://nodes.wavesnodes.com/' })
@@ -14,9 +31,18 @@ const BlockChain = {
 }
 
 export class LposCash {
-  constructor(){
-    this.signer = new Signer()
-    this.signer.setProvider(new ProviderWeb())
+  
+  /**
+   * 
+   * @param {string} opts.provider Can be one of [web, seed, cloud, keeper, ledger] 
+   */
+  constructor({type, seed}={type: 'keeper', seed:undefined}){
+
+    this.signerType = type==undefined ? 'web' : type  
+    this.signer = null
+    this.keeper = null
+
+    this.initSigner(seed)
 
     this.clear()
   }
@@ -53,8 +79,66 @@ export class LposCash {
     }
   }
 
+
+
+  initSigner(seed){
+
+    console.log('initSigner', this.signerType)
+
+    switch(this.signerType){
+      case 'web':
+      case 'seed':
+      case 'cloud':
+        this.signer = new Signer()
+        let provider = new SIGNER_PROVIDERS[this.signerType](seed)
+
+        this.signer.setProvider(provider)
+        break;
+
+      case 'keeper':
+        if(!WavesKeeper){
+          throw new Error('Waves Keeper not found')
+        }
+
+        this.keeper = WavesKeeper
+        this.keeper.on('update', this.handleKeeperUpdate.bind(this))
+        break;
+
+      case 'ledger':
+        throw new Error('ledger not yet supported')
+        break;
+
+    }
+
+
+  }
+
+  handleKeeperUpdate(state){
+    console.log('handleKeeperUpdate', state)
+  }
+
   async login(){
-    this.user = await this.signer.login()
+
+    console.log('login start', this.signerType)
+
+    switch(this.signerType){
+      case 'web':
+      case 'seed':
+      case 'cloud':
+        this.user = await this.signer.login()
+        break;
+
+      case 'keeper':
+
+        let keeperState = await this.keeper.publicState()
+
+        this.user = keeperState.account
+        break;
+
+      case 'ledger':
+        throw new Error('ledger not yet supported')
+        break;
+    }
     
     await this.update()
 
@@ -71,6 +155,8 @@ export class LposCash {
       this.updateBalances(),
       this.updateLeaseData()
     ])
+
+    console.log('update', this.balances, this.leases)
   }
 
   async updateLeaseData(){
@@ -104,7 +190,7 @@ export class LposCash {
 
   async updateBalances(){
     let [balancesAllAssets, balancesWaves, balancesService] = await Promise.all([
-      this.signer.getBalance(),
+      LposCash.fetchAssetBalances(this.user.address),
       LposCash.fetchBalanceDetails(this.user.address),
       LposCash.fetchBalanceDetails(LposCash.ServiceAddress)
     ])
@@ -240,6 +326,26 @@ export class LposCash {
     return res.data
   }
 
+  static async fetchAssetBalances(address){
+    const res = await WavesNode.get('/assets/balance/'+address)
+
+    return res.data
+  }
+
+  static async fetchAssetDetails(assetIds){
+    const ids = '?' + assetIds.map(id=>{return 'id='+id}).join('&')
+    const res = await WavesNode.get('/assets/details'+ids)
+
+    return res.data
+  }
+
+  static async fetchTransactions(address, limit=1000, after){
+    const afterStr = !after ? '' : '?after='+after
+    const res = await WavesNode.get('/transactions/address/'+address+'/limit/'+limit+afterStr)
+
+    return res.data
+  }
+
   async requestLease(amount){
     const tx = await this.signer.lease({
       amount,
@@ -256,5 +362,70 @@ export class LposCash {
 
   static get ServiceAlias(){
     return 'lposcash'
+  }
+}
+
+export class Exchange {
+
+  constructor(){
+    this.we = new wavesexchange({
+      apiKey: localStorage['WAVES_PUBLIC_KEY'],
+      secret: localStorage['WAVES_PRIVATE_KEY'],
+      timeout: 30000
+    });
+
+    this.we.urls.api.matcher="https://matcher.waves.exchange"
+
+    this.balances = null
+  }
+
+  async start(){
+    console.log('loading markets')
+    await this.we.loadMarkets();
+
+    const currencies = this.we.currencies; // Dictionary of currencies
+
+    const symbols = this.we.symbols; // Dictionary of trading pairs
+
+    const wavesUsdn = this.we.markets['WAVES/USDN']; // Get market structure by symbol
+
+    console.log('currencies', Object.keys(currencies))
+    console.log('symbols', symbols)
+
+    this.balances = await this.we.fetchBalance()
+    await this.loadOrders()
+
+  }
+
+  async loadOrders(){
+    console.log('loading account')
+
+    const [orders, closed, trades] = await Promise.all([
+      await this.we.fetchOpenOrders('WAVES/USDN'),
+      await this.we.fetchClosedOrders('WAVES/USDN'),
+      await this.we.fetchMyTrades('WAVES/USDN')
+    ])
+
+    
+    console.log('got open orders', orders)
+    
+    console.log('got closed oders', closed)
+    
+    console.log('got trades', trades)
+
+  }
+
+  static async demo(){
+
+    let e = new Exchange()
+
+    await e.start()
+
+    console.log('started')
+
+    setInterval(async ()=>{
+      console.log('interval')
+      await e.loadOrders()
+    }, 30000)
   }
 }
