@@ -9,7 +9,7 @@ const CompressionPlugin = require('compression-webpack-plugin')
 var nodeExternals = require('webpack-node-externals')
 
 var browser_config = {
-  mode: 'development',
+  mode: 'production',
   entry: {
     '@lposcash/api': './src/index.js'
   },
